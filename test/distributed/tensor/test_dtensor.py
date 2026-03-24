@@ -746,6 +746,56 @@ class DTensorTest(DTensorTestBase):
         self.assertNotEqual(hash(sharded_tensor._spec), hash(replica_tensor._spec))
 
     @with_comms
+    def test_dtensor_spec_shard_order_memoization(self):
+        """Regression test: compute_default_shard_order must return the same tuple
+        object for identical placements inputs (GC tuple leak fix).
+
+        Without memoization, every DTensorSpec instantiation (including those
+        triggered by shallow_copy_with_tensor_meta in sharding propagation) creates a
+        fresh shard_order tuple that accumulates in the unbounded LRU caches used by
+        the sharding propagator, causing a linear growth of GC-tracked tuple objects
+        during training.
+
+        See: https://github.com/pytorch/pytorch/issues/178276
+        """
+        device_mesh = self.build_device_mesh()
+
+        # Same placements → must be the exact same shard_order object (identity)
+        placements_shard0 = (Shard(0),)
+        so1 = DTensorSpec.compute_default_shard_order(placements_shard0)
+        so2 = DTensorSpec.compute_default_shard_order(placements_shard0)
+        self.assertIs(
+            so1,
+            so2,
+            "compute_default_shard_order must be memoized: same placements → same object",
+        )
+
+        # Verify that two DTensorSpec instances with the same placements share
+        # the same shard_order object (not just equal values)
+        local_tensor_a = torch.randn(3, 3)
+        local_tensor_b = torch.randn(3, 3)
+        dt_a = DTensor.from_local(local_tensor_a, device_mesh, [Shard(0)])
+        dt_b = DTensor.from_local(local_tensor_b, device_mesh, [Shard(0)])
+        self.assertIs(
+            dt_a._spec.shard_order,
+            dt_b._spec.shard_order,
+            "DTensorSpec.shard_order must be the same object for matching placements",
+        )
+
+        # shallow_copy_with_tensor_meta must also reuse the same shard_order object
+        new_meta = TensorMeta(
+            torch.Size([3 * self.world_size, 3]),
+            dt_a._spec.tensor_meta.stride,
+            dt_a._spec.tensor_meta.dtype,
+        )
+        spec_copy = dt_a._spec.shallow_copy_with_tensor_meta(new_meta)
+        self.assertIs(
+            dt_a._spec.shard_order,
+            spec_copy.shard_order,
+            "shallow_copy_with_tensor_meta must reuse the same shard_order object",
+        )
+
+    @with_comms
     def test_dtensor_properties(self):
         device_mesh = self.build_device_mesh()
         placements = [Shard(0)]

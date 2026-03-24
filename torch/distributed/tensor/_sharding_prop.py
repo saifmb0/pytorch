@@ -111,8 +111,8 @@ def _validate_tensor_meta_count(
 
 
 class LocalLRUCache(threading.local):
-    def __init__(self, user_function: Callable) -> None:
-        self.cache = lru_cache(None)(user_function)
+    def __init__(self, user_function: Callable, maxsize: int | None = 4096) -> None:
+        self.cache = lru_cache(maxsize)(user_function)
 
     def __call__(self, *args, **kwargs) -> object:
         # Fast path: log.handlers check is very cheap (just checking if list is non-empty)
@@ -326,6 +326,14 @@ class ShardingPropagator:
         self.propagate_op_sharding = LocalLRUCache(
             self.propagate_op_sharding_non_cached
         )
+        # Per-instance lru_cache for tensor meta propagation, consistent with
+        # propagate_op_sharding above.  A class-level @lru_cache on an instance
+        # method (the B019 anti-pattern) would keep `self` alive in the
+        # functools cache's internal key tuples, potentially creating reference
+        # cycles.  Using a bound-method cache stored on `self` avoids this.
+        self._propagate_tensor_meta_cached = lru_cache(maxsize=4096)(
+            self._propagate_tensor_meta_non_cached
+        )
         self.decomp_strategy = DecompShardingStrategy(self)
         # op map to save indices of shape (and stride) args which may need to be
         # modified in sharding prop
@@ -478,14 +486,13 @@ class ShardingPropagator:
             # if fake is not a tensor or tuple of tensor, return as none
             return None
 
-    @lru_cache  # noqa: B019
     def _propagate_tensor_meta_cached(
         self, op_schema: OpSchema
     ) -> TensorMeta | Sequence[TensorMeta | None] | None:
-        """
-        Cached version of _propagate_tensor_meta_non_cached
-        Use _propagate_tensor_meta instead to handle dynamic shapes.
-        """
+        # NOTE: This attribute is set in __init__ as an instance-level
+        # lru_cache wrapping _propagate_tensor_meta_non_cached.  It is
+        # declared here only so that type-checkers and IDEs can resolve
+        # the method signature.  The __init__ assignment shadows this.
         return self._propagate_tensor_meta_non_cached(op_schema)
 
     def _propagate_tensor_meta(

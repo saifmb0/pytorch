@@ -3,6 +3,7 @@ import itertools
 import math
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, cast, NamedTuple
 
 import torch
@@ -146,6 +147,7 @@ class DTensorSpec:
             return placements, DTensorSpec.compute_default_shard_order(placements)
 
     @staticmethod
+    @lru_cache(maxsize=256)  # intern shard_order tuples to avoid GC tuple leak
     def compute_default_shard_order(
         placements: tuple[Placement, ...],
     ) -> ShardOrder:
@@ -158,6 +160,15 @@ class DTensorSpec:
         Args:
             placements: Tuple of Placement objects representing how a tensor is
                 distributed across mesh dimensions.
+
+        Note: This is intentionally memoized so that the same ``placements``
+        tuple always returns the *same* ``shard_order`` object.  Without this,
+        every call to ``DTensorSpec.__post_init__`` (including those made by
+        ``shallow_copy_with_tensor_meta``) allocates a fresh tuple of
+        ``ShardOrderEntry`` NamedTuples.  Those tuples outlive their
+        ``DTensorSpec`` because they are indirectly reachable through the
+        sharding-propagation LRU caches, causing a linear GC-tracked object
+        growth during long training runs.
         """
         # follow default left-to-right device order if shard_order is not specified
         tensor_dim_to_mesh_dims: defaultdict[int, list[int]] = defaultdict(list)
